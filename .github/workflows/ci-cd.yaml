@@ -1,82 +1,71 @@
-name: CI/CD (Docker Hub → Kubernetes)
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch: {}
-
-env:
-  # змінюй тільки якщо треба інший неймспейс
-  NAMESPACE: default
-  # твій репозиторій в Docker Hub, наприклад katerinadud/nestjs-app
-  DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/nestjs-app
+    branches:
+      - main
 
 jobs:
-  build_and_push:
+  build-and-push:
     runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ github.sha }}
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Buildx
+      - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
+      - name: Docker Hub Login
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & Push (latest + sha)
-        uses: docker/build-push-action@v6
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
         with:
           context: .
+          file: ./Dockerfile
           push: true
-          tags: |
-            ${{ env.DOCKERHUB_REPO }}:latest
-            ${{ env.DOCKERHUB_REPO }}:${{ github.sha }}
+          tags: katerinadud/nestjs-app:${{ env.IMAGE_TAG }}
 
   deploy:
-    needs: build_and_push
+    needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Generate Redis secret manifest
+        run: |
+          mkdir -p k8s
+          cat <<EOF > k8s/redis-secret.yaml
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: redis-secret
+          type: Opaque
+          stringData:
+            REDIS_PASSWORD: "${{ secrets.REDIS_PASSWORD }}"
+          EOF
+
       - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@v3
         with:
-          version: "v1.30.0"
+          version: v1.27.0
 
-      - name: Install kustomize
+      - name: Setup kubeconfig
+        run: echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
+
+      - name: Update NestJS image tag in manifest
+        run: sed -i "s|image: .*|image: katerinadud/nestjs-app:${{ env.IMAGE_TAG }}|g" k8s/nestjs-deployment.yaml
+
+      - name: Deploy Kubernetes manifests
         run: |
-          curl -sSL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
-          sudo mv kustomize /usr/local/bin/kustomize
-
-      - name: Configure kubeconfig
-        run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
-
-      - name: Ensure namespace exists
-        run: |
-          kubectl get ns ${{ env.NAMESPACE }} >/dev/null 2>&1 || \
-          kubectl create ns ${{ env.NAMESPACE }}
-
-      - name: Apply/Update redis-secret from GitHub Secret
-        run: |
-          kubectl -n ${{ env.NAMESPACE }} create secret generic redis-secret \
-            --from-literal=REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-      # Підставляємо свіжий тег образу замість ghcr.io/placeholder у твоєму nestjs-deployment.yaml через Kustomize
-      - name: Point manifests to freshly built image
-        working-directory: k8s
-        run: |
-          kustomize edit set image katerinadud/nestjs-app:latest=${{ env.DOCKERHUB_REPO }}:${{ github.sha }}
-
-      - name: Deploy manifests
-        run: | 
-          kustomize build k8s | kubectl apply -n ${{ env.NAMESPACE }} -f -
-          kubectl -n ${{ env.NAMESPACE }} rollout status deploy/nestjs-app --timeout=180s
-          kubectl -n ${{ env.NAMESPACE }} get pods,svc,ingress
+          kubectl apply -f k8s/redis-secret.yaml
+          kubectl apply -f k8s/redis-deployment.yaml
+          kubectl apply -f k8s/nestjs-deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/ingress.yaml
