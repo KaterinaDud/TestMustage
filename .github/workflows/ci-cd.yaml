@@ -1,71 +1,56 @@
-name: CI/CD Pipeline
-
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+env:
+  NAMESPACE: default
+  DOCKERHUB_REPO: katerinadud/nestjs-app
 
 jobs:
-  build-and-push:
+  build_and_push:
     runs-on: ubuntu-latest
-    env:
-      IMAGE_TAG: ${{ github.sha }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Docker Hub Login
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
           push: true
-          tags: katerinadud/nestjs-app:${{ env.IMAGE_TAG }}
+          tags: |
+            ${{ env.DOCKERHUB_REPO }}:latest
+            ${{ env.DOCKERHUB_REPO }}:${{ github.sha }}
 
   deploy:
-    needs: build-and-push
+    needs: build_and_push
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Generate Redis secret manifest
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+        with: { version: "v1.30.0" }
+      - name: Install kustomize
         run: |
-          mkdir -p k8s
-          cat <<EOF > k8s/redis-secret.yaml
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: redis-secret
-          type: Opaque
-          stringData:
-            REDIS_PASSWORD: "${{ secrets.REDIS_PASSWORD }}"
-          EOF
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: v1.27.0
-
-      - name: Setup kubeconfig
-        run: echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
-
-      - name: Update NestJS image tag in manifest
-        run: sed -i "s|image: .*|image: katerinadud/nestjs-app:${{ env.IMAGE_TAG }}|g" k8s/nestjs-deployment.yaml
-
-      - name: Deploy Kubernetes manifests
+          curl -sSL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
+          sudo mv kustomize /usr/local/bin/kustomize
+      - name: Configure kubeconfig
         run: |
-          kubectl apply -f k8s/redis-secret.yaml
-          kubectl apply -f k8s/redis-deployment.yaml
-          kubectl apply -f k8s/nestjs-deployment.yaml
-          kubectl apply -f k8s/service.yaml
-          kubectl apply -f k8s/ingress.yaml
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
+      - name: Ensure namespace + redis secret
+        run: |
+          kubectl get ns ${{ env.NAMESPACE }} >/dev/null 2>&1 || kubectl create ns ${{ env.NAMESPACE }}
+          kubectl -n ${{ env.NAMESPACE }} create secret generic redis-secret \
+            --from-literal=REDIS_PASSWORD="${{ secrets.REDIS_PASSWORD }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+      - name: Point manifests to freshly built image
+        working-directory: k8s
+        run: |
+          kustomize edit set image ${{ env.DOCKERHUB_REPO }}=${{ env.DOCKERHUB_REPO }}:${{ github.sha }}
+      - name: Deploy
+        run: |
+          kustomize build k8s | kubectl apply -n ${{ env.NAMESPACE }} -f -
+          kubectl -n ${{ env.NAMESPACE }} rollout status deploy/nestjs-app --timeout=180s
