@@ -35,7 +35,7 @@ spec:
             requests: { cpu: "100m", memory: "128Mi" }
             limits:   { cpu: "300m", memory: "256Mi" }
           readinessProbe:
-            httpGet: { path: /redis, port: 3001 }
+            httpGet: { path: /redis, port: 3000 }
             initialDelaySeconds: 10
             periodSeconds: 5
           livenessProbe:
@@ -52,4 +52,4 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: 3001 
+      targetPort: 3000

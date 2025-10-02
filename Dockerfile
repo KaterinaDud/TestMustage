@@ -32,7 +32,7 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
 USER appuser
 
 # порт застосунку
-EXPOSE 3001
+EXPOSE 3000
 
 # простий healthcheck (Node 20 має вбудований fetch)
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
