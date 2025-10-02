@@ -32,11 +32,11 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
 USER appuser
 
 # порт застосунку
-EXPOSE 3000
+EXPOSE 3001
 
 # простий healthcheck (Node 20 має вбудований fetch)
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/redis').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:3001/redis').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "dist/main.js"]
 
